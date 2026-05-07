@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"path"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -102,7 +104,10 @@ func (p *ModelProviderResolverPlugin) ProcessRequest(ctx context.Context, cycleS
 	}
 
 	log.FromContext(ctx).V(logutil.VERBOSE).Info("received incoming request", "path", request.Headers[":path"])
-	relativePath := sanitizePath(request.Headers[":path"])
+	relativePath, err := sanitizePath(request.Headers[":path"])
+	if err != nil {
+		return errcommon.Error{Code: errcommon.BadRequest, Msg: fmt.Sprintf("invalid request path: %v", err)}
+	}
 
 	segments := strings.Split(relativePath, "/")
 	if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
@@ -137,12 +142,58 @@ func (p *ModelProviderResolverPlugin) ProcessRequest(ctx context.Context, cycleS
 	return nil
 }
 
-func sanitizePath(relativeUrlPath string) string {
+// sanitizePath cleans and validates a relative URL path. It returns an error for paths
+// containing null bytes, control characters, path traversal sequences, or invalid encoding.
+func sanitizePath(relativeUrlPath string) (string, error) {
 	relativeUrlPath = strings.TrimSpace(relativeUrlPath)
 
-	if index := strings.IndexByte(relativeUrlPath, '?'); index >= 0 {
-		relativeUrlPath = relativeUrlPath[:index] // remove query params
+	// Null byte protection — must be checked before any further processing.
+	if strings.ContainsRune(relativeUrlPath, '\x00') {
+		return "", fmt.Errorf("path contains null byte")
 	}
 
-	return strings.Trim(relativeUrlPath, "/")
+	// Control character validation (0x01–0x1F and DEL 0x7F).
+	for _, r := range relativeUrlPath {
+		if (r >= 0x01 && r <= 0x1F) || r == 0x7F {
+			return "", fmt.Errorf("path contains control character 0x%02X", r)
+		}
+	}
+
+	// Fragment removal — strip '#' and everything after it.
+	if idx := strings.IndexByte(relativeUrlPath, '#'); idx >= 0 {
+		relativeUrlPath = relativeUrlPath[:idx]
+	}
+
+	// Query parameter removal.
+	if idx := strings.IndexByte(relativeUrlPath, '?'); idx >= 0 {
+		relativeUrlPath = relativeUrlPath[:idx]
+	}
+
+	// URL-decode to catch encoding bypasses such as %2e%2e or %2f.
+	decoded, err := url.PathUnescape(relativeUrlPath)
+	if err != nil {
+		return "", fmt.Errorf("path contains invalid percent-encoding: %w", err)
+	}
+
+	// Re-check for null bytes that were percent-encoded (e.g. %00).
+	if strings.ContainsRune(decoded, '\x00') {
+		return "", fmt.Errorf("path contains encoded null byte")
+	}
+
+	// Path traversal validation — inspect the decoded path before any normalization
+	// so that path.Clean cannot silently absorb traversal sequences.
+	// Split on '/' first, then on '\' within each segment to catch Windows-style
+	// traversals such as "..\etc\passwd".
+	for _, seg := range strings.Split(decoded, "/") {
+		for _, bseg := range strings.Split(seg, `\`) {
+			if bseg == ".." || bseg == "." {
+				return "", fmt.Errorf("path traversal detected")
+			}
+		}
+	}
+
+	// Normalize the validated path.
+	normalized := path.Clean("/" + decoded)
+
+	return strings.Trim(normalized, "/"), nil
 }

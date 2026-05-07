@@ -103,6 +103,139 @@ func TestProcessRequest_NoModel(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestSanitizePath(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantPath  string
+		wantError bool
+	}{
+		// Happy-path cases
+		{
+			name:     "normal path",
+			input:    "/llm/claude-sonnet/v1/chat/completions",
+			wantPath: "llm/claude-sonnet/v1/chat/completions",
+		},
+		{
+			name:     "path with query params stripped",
+			input:    "/llm/model/v1/chat/completions?foo=bar",
+			wantPath: "llm/model/v1/chat/completions",
+		},
+		{
+			name:     "path with fragment stripped",
+			input:    "/llm/model/v1/chat/completions#section",
+			wantPath: "llm/model/v1/chat/completions",
+		},
+		{
+			name:     "path with both query and fragment stripped",
+			input:    "/llm/model/v1/chat/completions?foo=1#section",
+			wantPath: "llm/model/v1/chat/completions",
+		},
+		{
+			name:     "leading and trailing slashes trimmed",
+			input:    "/llm/model/v1/chat/completions/",
+			wantPath: "llm/model/v1/chat/completions",
+		},
+		{
+			name:     "surrounding whitespace trimmed",
+			input:    "  /llm/model/v1/chat/completions  ",
+			wantPath: "llm/model/v1/chat/completions",
+		},
+
+		// Path traversal
+		{
+			name:      "path traversal with dot-dot-slash",
+			input:     "/llm/../etc/passwd",
+			wantError: true,
+		},
+		{
+			name:      "path traversal at root",
+			input:     "/../etc/passwd",
+			wantError: true,
+		},
+		{
+			name:      "path traversal with backslash notation",
+			input:     `/llm/..\etc\passwd`,
+			wantError: true,
+		},
+		{
+			name:      "path traversal multiple levels",
+			input:     "/a/b/../../etc/passwd",
+			wantError: true,
+		},
+
+		// URL-encoded bypass
+		{
+			name:      "URL-encoded dot-dot (%2e%2e) traversal",
+			input:     "/llm/%2e%2e/etc/passwd",
+			wantError: true,
+		},
+		{
+			name:      "URL-encoded slash (%2f) in traversal",
+			input:     "/llm/..%2fetc%2fpasswd",
+			wantError: true,
+		},
+		{
+			name:      "mixed case URL-encoded traversal (%2E%2E)",
+			input:     "/llm/%2E%2E/secret",
+			wantError: true,
+		},
+
+		// Null byte
+		{
+			name:      "null byte in path",
+			input:     "/llm/model\x00/chat",
+			wantError: true,
+		},
+		{
+			name:      "percent-encoded null byte (%00)",
+			input:     "/llm/model%00/chat",
+			wantError: true,
+		},
+
+		// Control characters
+		{
+			name:      "control character 0x01 in path",
+			input:     "/llm/mo\x01del/chat",
+			wantError: true,
+		},
+		{
+			name:      "control character DEL (0x7F) in path",
+			input:     "/llm/mo\x7fdel/chat",
+			wantError: true,
+		},
+		{
+			name:      "newline character in path",
+			input:     "/llm/model\n/chat",
+			wantError: true,
+		},
+		{
+			name:      "carriage return in path",
+			input:     "/llm/model\r/chat",
+			wantError: true,
+		},
+
+		// Invalid encoding
+		{
+			name:      "invalid percent-encoding",
+			input:     "/llm/model%GG/chat",
+			wantError: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := sanitizePath(tc.input)
+			if tc.wantError {
+				require.Error(t, err, "expected an error for input %q", tc.input)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.wantPath, got)
+			}
+		})
+	}
+}
+
 func TestProcessRequest_BadPath(t *testing.T) {
 	store := newModelInfoStore()
 	store.addOrUpdateExternalModel(
