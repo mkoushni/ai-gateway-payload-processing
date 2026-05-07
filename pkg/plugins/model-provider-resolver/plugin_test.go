@@ -215,6 +215,28 @@ func TestSanitizePath(t *testing.T) {
 			wantError: true,
 		},
 
+		// Percent-encoded control characters (regression: post-decode check)
+		{
+			name:      "percent-encoded LF (%0A) bypasses raw control-char scan",
+			input:     "/llm/mo%0Adel/chat",
+			wantError: true,
+		},
+		{
+			name:      "percent-encoded CR (%0D) log-injection attempt",
+			input:     "/llm/foo%0DSet-Cookie:%20x=y/v1/chat/completions",
+			wantError: true,
+		},
+		{
+			name:      "percent-encoded control byte %01",
+			input:     "/llm/mo%01del/chat",
+			wantError: true,
+		},
+		{
+			name:      "percent-encoded DEL (%7F)",
+			input:     "/llm/mo%7Fdel/chat",
+			wantError: true,
+		},
+
 		// Invalid encoding
 		{
 			name:      "invalid percent-encoding",

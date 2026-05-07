@@ -175,9 +175,16 @@ func sanitizePath(relativeUrlPath string) (string, error) {
 		return "", fmt.Errorf("path contains invalid percent-encoding: %w", err)
 	}
 
-	// Re-check for null bytes that were percent-encoded (e.g. %00).
+	// Re-check for null bytes and control characters that were percent-encoded
+	// (e.g. %00, %0A, %0D, %01, %7F). The raw scan above only catches literal
+	// control bytes; this second pass catches the decoded forms.
 	if strings.ContainsRune(decoded, '\x00') {
 		return "", fmt.Errorf("path contains encoded null byte")
+	}
+	for _, r := range decoded {
+		if (r >= 0x01 && r <= 0x1F) || r == 0x7F {
+			return "", fmt.Errorf("path contains encoded control character 0x%02X", r)
+		}
 	}
 
 	// Path traversal validation — inspect the decoded path before any normalization
